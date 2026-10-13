@@ -1,0 +1,25 @@
+[package]
+name = "jira-tern"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+description = "Tern app: browse Jira issues, read and write comments, run status transitions, create Git worktrees / native jj workspaces and start omp in them"
+repository = "https://github.com/hanbong5938/jira-tern"
+
+[[bin]]
+name = "jira-tern"
+path = "src/main.rs"
+
+[dependencies]
+# crates.io 0.1.0 lacks Session::waker / Input::Clipboard; pin the synced SDK.
+tern-sdk = { git = "https://github.com/stencil-hq/tern-sdk", rev = "13d3cca8bbd8f055431f8eb3caa434a22e966f8f" }
+ureq = { version = "2.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+libc = "0.2"
+
+[profile.release]
+strip = true
+lto = true

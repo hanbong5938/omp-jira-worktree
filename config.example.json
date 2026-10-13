@@ -15,7 +15,7 @@
   "worktree": {
     "repos": {},
     "prefer": "jj",
-    "root": "~/.local/share/omp-jira-worktree/checkouts",
+    "root": "~/.local/share/jira-tern/checkouts",
     "gitBase": null,
     "jjBase": null
   },
