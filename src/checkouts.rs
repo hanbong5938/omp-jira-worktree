@@ -202,9 +202,13 @@ fn canonicalize_missing(target: &Path) -> R<PathBuf> {
         let Some(parent) = current.parent().map(Path::to_path_buf) else {
             return fail(format!("no existing ancestor for {}", target.display()));
         };
-        if let Some(name) = current.file_name() {
-            rest.push(name.to_os_string());
-        }
+        let Some(name) = current.file_name() else {
+            return fail(format!(
+                "{} contains '..' after a missing directory; use a normalized worktree.root",
+                target.display()
+            ));
+        };
+        rest.push(name.to_os_string());
         current = parent;
     }
 }
@@ -1949,6 +1953,86 @@ mod tests {
 
     fn is_recovery<T: fmt::Debug>(result: R<T>) -> bool {
         matches!(result, Err(CheckoutError::RecoveryRequired { .. }))
+    }
+
+    fn service_with_root(fx: &Fixture, root: &Path) -> CheckoutService {
+        let mut config = fx.config();
+        config.root = path_str(root);
+        CheckoutService::with_runner(config, StateStore::new(fx.state_dir()).unwrap(), plain())
+    }
+
+    #[test]
+    fn missing_parent_component_rejected_before_creation() {
+        let fx = Fixture::new();
+        let repo_fx = fx.git_repo("source");
+        let service = service_with_root(&fx, &fx.temp.join("missing/../checkouts"));
+        let repo = service
+            .resolve_repository(&repo_fx.root, Backend::Git)
+            .unwrap();
+        let error = err_text(service.plan_checkout(&repo, new_sel("TEST-1", None)));
+        assert!(
+            error.contains("contains '..' after a missing directory"),
+            "{error}"
+        );
+        assert!(!fx.temp.join("missing").exists());
+        assert!(!fx.temp.join("checkouts").exists());
+        assert!(fx.receipt_states().is_empty());
+        let root = Path::new(&repo_fx.root);
+        assert_eq!(fx.sh(&["git", "branch", "--list", "TEST-1"], root), "");
+        assert_eq!(
+            fx.sh(&["git", "worktree", "list", "--porcelain"], root)
+                .matches("worktree ")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn existing_parent_and_symlink_semantics_preserved() {
+        let fx = Fixture::new();
+        let repo_fx = fx.git_repo("source");
+        let plan_dest = |root: PathBuf| -> R<String> {
+            let service = service_with_root(&fx, &root);
+            let repo = service.resolve_repository(&repo_fx.root, Backend::Git)?;
+            Ok(service
+                .plan_checkout(&repo, new_sel("TEST-1", None))?
+                .destination()
+                .to_string())
+        };
+        let under = |dest: &str, dir: &Path| {
+            assert!(
+                dest.starts_with(&format!("{}/source-", path_str(dir))),
+                "{dest}"
+            );
+        };
+
+        fs::create_dir(fx.temp.join("exists")).unwrap();
+        under(
+            &plan_dest(fx.temp.join("exists/../checkouts")).unwrap(),
+            &fx.temp.join("checkouts"),
+        );
+
+        fs::create_dir_all(fx.temp.join("real/nested")).unwrap();
+        std::os::unix::fs::symlink(fx.temp.join("real/nested"), fx.temp.join("link")).unwrap();
+        under(
+            &plan_dest(fx.temp.join("link/../checkouts")).unwrap(),
+            &fx.temp.join("real/checkouts"),
+        );
+
+        std::os::unix::fs::symlink(&repo_fx.root, fx.temp.join("inside")).unwrap();
+        let error = err_text(plan_dest(fx.temp.join("inside/checkouts")));
+        assert!(error.contains("inside the source repository"), "{error}");
+
+        std::os::unix::fs::symlink(fx.temp.join("nowhere"), fx.temp.join("dangling")).unwrap();
+        let error = err_text(plan_dest(fx.temp.join("dangling/checkouts")));
+        assert!(error.contains("dangling symlink?"), "{error}");
+
+        fs::write(fx.temp.join("file"), "").unwrap();
+        let error = err_text(plan_dest(fx.temp.join("file/checkouts")));
+        assert!(error.to_lowercase().contains("not a directory"), "{error}");
+
+        assert!(!fx.temp.join("checkouts").exists());
+        assert!(!fx.temp.join("real/checkouts").exists());
     }
 
     #[test]

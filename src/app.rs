@@ -95,6 +95,7 @@ pub(crate) enum Cmd {
     AckTransition {
         generation: u64,
         key: String,
+        attempt: String,
     },
     ResolveRepos {
         generation: u64,
@@ -318,6 +319,36 @@ fn is_char(key: &Key, text: &str) -> bool {
 
 fn is_confirm(key: &Key) -> bool {
     key.is("enter") || is_char(key, "y")
+}
+
+/// Line/page/end scrolling shared by scrollable text panes.
+fn scroll_key(key: &Key) -> Option<ScrollBy> {
+    if key.is("up") || is_char(key, "k") {
+        Some(ScrollBy::LineUp)
+    } else if key.is("down") || is_char(key, "j") {
+        Some(ScrollBy::LineDown)
+    } else if key.is("page_up") {
+        Some(ScrollBy::PageUp)
+    } else if key.is("page_down") {
+        Some(ScrollBy::PageDown)
+    } else if key.is("end") || is_char(key, "G") {
+        Some(ScrollBy::End)
+    } else {
+        None
+    }
+}
+
+/// Scrolls the static wizard text; returns whether `key` was a scroll key.
+fn scroll_wizard_text(key: &Key, cmds: &mut Vec<Cmd>) -> bool {
+    let by = if key.is("home") || is_char(key, "g") {
+        ScrollBy::Start
+    } else if let Some(by) = scroll_key(key) {
+        by
+    } else {
+        return false;
+    };
+    cmds.push(Cmd::Scroll(view::WIZARD_TEXT_ID.to_owned(), by));
+    true
 }
 
 fn is_back(key: &Key) -> bool {
@@ -768,6 +799,7 @@ pub(crate) enum TStep {
     },
     Blocked {
         since: String,
+        attempt: String,
         url: String,
     },
     Acknowledging {
@@ -1507,19 +1539,7 @@ impl State {
             cmds.push(Cmd::Reveal(target.to_owned(), RevealAt::Start));
             return;
         }
-        let scroll = if key.is("up") || is_char(key, "k") {
-            Some(ScrollBy::LineUp)
-        } else if key.is("down") || is_char(key, "j") {
-            Some(ScrollBy::LineDown)
-        } else if key.is("page_up") {
-            Some(ScrollBy::PageUp)
-        } else if key.is("page_down") {
-            Some(ScrollBy::PageDown)
-        } else if key.is("end") || is_char(key, "G") {
-            Some(ScrollBy::End)
-        } else {
-            None
-        };
+        let scroll = scroll_key(key);
         if let Some(by) = scroll {
             cmds.push(Cmd::Scroll(pane.to_owned(), by));
             return;
@@ -1732,12 +1752,17 @@ impl State {
         let mut message = None;
         let step = match step {
             TStep::Loading { .. } if key.is("escape") => return self.close_transition(cmds),
-            TStep::Blocked { since, url } => {
+            TStep::Blocked {
+                since,
+                attempt,
+                url,
+            } => {
                 if is_confirm(key) {
                     let generation = self.next_gen();
                     cmds.push(Cmd::AckTransition {
                         generation,
                         key: issue_key.clone(),
+                        attempt,
                     });
                     TStep::Acknowledging { generation }
                 } else if is_back(key) {
@@ -1749,7 +1774,11 @@ impl State {
                     ));
                     return self.close_transition(cmds);
                 } else {
-                    TStep::Blocked { since, url }
+                    TStep::Blocked {
+                        since,
+                        attempt,
+                        url,
+                    }
                 }
             }
             TStep::Pick {
@@ -1854,8 +1883,15 @@ impl State {
         };
         let (step, message) = match (step, done) {
             (TStep::Loading { generation }, Done::TransitionsLoaded { generation: got, result }) if generation == got => match result {
-                Ok(choices) => match choices.blocked_since.clone() {
-                    Some(since) => (TStep::Blocked { since, url: choices.issue.url.clone() }, message),
+                Ok(choices) => match choices.blocked.clone() {
+                    Some(blocked) => (
+                        TStep::Blocked {
+                            since: blocked.started_at,
+                            attempt: blocked.attempt,
+                            url: choices.issue.url.clone(),
+                        },
+                        message,
+                    ),
                     None if choices.transitions.is_empty() => (
                         finished(
                             "No transitions",
@@ -1877,6 +1913,14 @@ impl State {
                         let generation = self.next_gen();
                         cmds.push(Cmd::LoadTransitions { generation, key: key.clone() });
                         (TStep::Loading { generation }, None)
+                    }
+                    Err(TransitionError::Blocked { .. }) => {
+                        let generation = self.next_gen();
+                        cmds.push(Cmd::LoadTransitions { generation, key: key.clone() });
+                        let text = format!(
+                            "{key}: 확인하던 전환 요청과 다른 새 요청이 기록되어 승인하지 않았습니다. 이력을 다시 확인하세요."
+                        );
+                        (TStep::Loading { generation }, Some(Notice::new(Level::Warning, text)))
                     }
                     Err(error) => (
                         finished("Status change failed", format!("{key}: {}", clip(&error.to_string())), Level::Error),
@@ -1917,8 +1961,8 @@ impl State {
                         },
                         None,
                     ),
-                    Err(TransitionError::Blocked { record_started_at }) => {
-                        (TStep::Blocked { since: record_started_at, url }, None)
+                    Err(TransitionError::Blocked { attempt, record_started_at }) => {
+                        (TStep::Blocked { since: record_started_at, attempt, url }, None)
                     }
                     Err(TransitionError::Changed(detail)) => {
                         let generation = self.next_gen();
@@ -2213,6 +2257,7 @@ impl State {
                 } else if is_back(key) {
                     Self::existing_step(&w)
                 } else {
+                    scroll_wizard_text(key, cmds);
                     WStep::RecoveryAck {
                         checkout,
                         message,
@@ -2263,6 +2308,7 @@ impl State {
                         WStep::Instruction
                     }
                 } else {
+                    scroll_wizard_text(key, cmds);
                     WStep::Preview
                 }
             }
@@ -2272,6 +2318,7 @@ impl State {
                 } else if is_back(key) {
                     WStep::Preview
                 } else {
+                    scroll_wizard_text(key, cmds);
                     WStep::PartialAccept
                 }
             }
@@ -2300,6 +2347,7 @@ impl State {
                         None => WStep::Confirm,
                     }
                 } else {
+                    scroll_wizard_text(key, cmds);
                     WStep::Confirm
                 }
             }
@@ -2325,6 +2373,7 @@ impl State {
                 } else if is_char(key, "l") && outcome.relaunch.is_some() {
                     WStep::RelaunchConfirm(outcome)
                 } else {
+                    scroll_wizard_text(key, cmds);
                     WStep::Outcome(outcome)
                 }
             }
@@ -2341,6 +2390,7 @@ impl State {
                 } else if is_back(key) {
                     WStep::Outcome(outcome)
                 } else {
+                    scroll_wizard_text(key, cmds);
                     WStep::RelaunchConfirm(outcome)
                 }
             }
@@ -2351,6 +2401,7 @@ impl State {
                         Next::ListExisting(prefer) => self.listing(&mut w, prefer, cmds),
                     }
                 } else {
+                    scroll_wizard_text(key, cmds);
                     WStep::Message { title, lines, next }
                 }
             }
@@ -2809,12 +2860,14 @@ impl Runner {
                 generation,
                 result: s.transitions.apply(&key, &from, &transition),
             }),
-            Cmd::AckTransition { generation, key } => {
-                self.spawn(move |s| Done::TransitionAcknowledged {
-                    generation,
-                    result: s.transitions.acknowledge_unknown(&key),
-                })
-            }
+            Cmd::AckTransition {
+                generation,
+                key,
+                attempt,
+            } => self.spawn(move |s| Done::TransitionAcknowledged {
+                generation,
+                result: s.transitions.acknowledge_unknown(&key, &attempt),
+            }),
             Cmd::ResolveRepos {
                 generation,
                 candidates,
@@ -3091,9 +3144,18 @@ fn event_loop(
     };
     let mut focused: Option<&'static str> = None;
     let mut revealed: Option<String> = None;
+    let mut wizard_step: Option<std::mem::Discriminant<WStep>> = None;
     loop {
         let ui_ops: Vec<Cmd> = cmds.drain(..).filter_map(|cmd| runner.run(cmd)).collect();
         session.render(sf, view::render(&state))?;
+        let step = match &state.flow {
+            Some(Flow::Wizard(w)) => Some(std::mem::discriminant(&w.step)),
+            _ => None,
+        };
+        if step.is_some() && step != wizard_step {
+            session.scroll(sf, view::WIZARD_TITLE_ID, ScrollBy::Start)?;
+        }
+        wizard_step = step;
         let focus = view::focus_id(&state);
         if focus != focused {
             session.focus(sf, focus)?;
@@ -3482,5 +3544,65 @@ mod tests {
         assert_eq!(buf.cursor, 1);
         buf.edit(&key("backspace"), true);
         assert_eq!(buf.text, "😀\né");
+    }
+
+    #[test]
+    fn stale_transition_ack_requires_fresh_prompt() {
+        let mut s = state();
+        let generation = s.next_gen();
+        s.flow = Some(Flow::Transition(TransitionFlow {
+            key: "A-1".into(),
+            step: TStep::Acknowledging { generation },
+            message: None,
+        }));
+        let cmds = s.on_done(Done::TransitionAcknowledged {
+            generation,
+            result: Err(TransitionError::Blocked {
+                attempt: "attempt-y".into(),
+                record_started_at: "2026-10-13T00:00:00.000Z".into(),
+            }),
+        });
+        let load = match cmds.as_slice() {
+            [Cmd::LoadTransitions { generation, key }] if key == "A-1" => *generation,
+            other => panic!("expected reload, got {}", other.len()),
+        };
+        assert!(matches!(
+            &s.flow,
+            Some(Flow::Transition(TransitionFlow {
+                step: TStep::Loading { generation },
+                message: Some(Notice { level: Level::Warning, .. }),
+                ..
+            })) if *generation == load
+        ));
+
+        // A completion from another generation leaves the flow untouched.
+        s.on_done(Done::TransitionsLoaded {
+            generation: load + 100,
+            result: Err(TransitionError::Changed("stale".into())),
+        });
+        assert!(matches!(
+            &s.flow,
+            Some(Flow::Transition(TransitionFlow { step: TStep::Loading { generation }, .. }))
+                if *generation == load
+        ));
+
+        s.on_done(Done::TransitionsLoaded {
+            generation: load,
+            result: Ok(TransitionChoices {
+                issue: issue("A-1"),
+                transitions: Vec::new(),
+                blocked: Some(crate::transitions::BlockedAttempt {
+                    attempt: "attempt-y".into(),
+                    started_at: "2026-10-13T00:00:00.000Z".into(),
+                }),
+            }),
+        });
+        assert!(matches!(
+            &s.flow,
+            Some(Flow::Transition(TransitionFlow {
+                step: TStep::Blocked { attempt, since, .. },
+                ..
+            })) if attempt == "attempt-y" && since == "2026-10-13T00:00:00.000Z"
+        ));
     }
 }

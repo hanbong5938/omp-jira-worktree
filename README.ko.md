@@ -44,6 +44,19 @@ tern plugin link .
 
 macOS 키체인 토큰 명령 예: `["security", "find-generic-password", "-s", "jira-api-token", "-a", "<you>", "-w"]`.
 
+### omp-jira-worktree에서 업그레이드
+
+자동 마이그레이션은 없습니다. 아래 순서대로 직접 전환하세요. 아래 절차는 어떤 데이터도 옮기거나 삭제하지 않습니다.
+
+1. 구버전 omp extension과 모든 jira-tern 인스턴스를 종료하고, 진행 중인 native add/전환/launch가 없는지 확인합니다. 두 namespace의 lock은 서로를 보호하지 않으므로 둘을 함께 실행하면서 전환하지 마세요.
+2. 구 설정: `$OMP_JIRA_WORKTREE_CONFIG` 또는 `${XDG_CONFIG_HOME:-~/.config}/omp-jira-worktree/config.json`. 새 설정: `$JIRA_TERN_CONFIG` 또는 `${XDG_CONFIG_HOME:-~/.config}/jira-tern/config.json`(`XDG_CONFIG_HOME`은 절대 경로일 때만 사용). 원본은 보존하고 새 경로에 파일이 없을 때만 복사합니다. 새 설정이 이미 있으면 덮어쓰지 말고 수동으로 비교하세요. `JIRA_TERN_CONFIG`에 절대 경로를 지정해도 됩니다. jira-tern은 `OMP_JIRA_WORKTREE_CONFIG`를 **읽지 않습니다**.
+3. top-level key는 동일합니다(`jira`, `filters`, `search`, `worktree`, `handoff`, `omp`). 복사본을 `config.example.json`과 비교하고 URL·경로 오류를 고치세요. `worktree.root`를 생략했고 기존 위치를 계속 쓰려면 `"root": "~/.local/share/omp-jira-worktree/checkouts"`를 명시합니다. 생략하면 새 기본값 `~/.local/share/jira-tern/checkouts`가 쓰입니다. 명시된 root는 그대로 둡니다. `jira.baseUrl`은 이제 표준 URL parser로 정규화되며(IDN → Punycode, 기본 port 제거, 비정규 IPv4·context path 정규화) 이 정규 URL이 전환 기록의 site identity입니다. 구 기록의 `site`와 새 정규 URL을 비교하고, 다르면 6단계 확인을 먼저 하세요.
+4. **기존 Git worktree/jj workspace는 절대 `mv`/`cp` 하지 마세요.** native 등록과 identity가 그대로 유지되어야 합니다. `git -C <source> worktree list --porcelain` 또는 `jj --ignore-working-copy -R <source> workspace list`와 각 checkout 상태를 확인한 뒤 jira-tern에서 **Existing**으로 선택합니다. 기존 branch/workspace에 **New**를 다시 실행하지 마세요.
+5. 구 상태 root: `${XDG_STATE_HOME:-~/.local/state}/omp-jira-worktree`. 새 root: `${XDG_STATE_HOME:-~/.local/state}/jira-tern`. 구 디렉터리와 handoff 파일을 보존합니다. state/locks/receipts/transitions를 통째로 복사하거나 삭제하지 마세요. receipt 구조가 비슷해도 state가 호환된다는 뜻은 아닙니다.
+6. 구 전환 기록은 `transitions/<SHA-256(JSON([site,key]))>.json`, 새 기록은 `records/transitions/<자체 128-bit digest>.json`입니다. 구 `pending`/`unknown` 기록마다 `site`, `key`, `attempt`, `startedAt`, `transitionId`를 읽고, jira-tern에서 전환을 보내기 **전에** Jira에서 해당 이슈의 실제 이력을 확인하세요. 확인할 수 없는 기록이 있으면 전환을 중단합니다. 현재 상태가 같다는 이유만으로 요청이 실행되지 않았다고 판단하거나 재전송하지 마세요. **경고:** jira-tern은 구 기록을 읽지 않으므로 중복 전환이 자동으로 차단되지 않습니다.
+7. 구 pending/failed receipt는 destination의 파일, branch/workspace, working tree 상태를 직접 확인합니다. 확인 전에는 불확실한 checkout을 열거나 재생성하지 마세요. receipt가 없으면 jira-tern이 복구 질문을 **표시하지 않을 수도 있으며**, 질문이 나온다고 안전이 보장되지도 않습니다. 손상되었다면 native Git/jj 도구로 복구할 때까지 중단하세요.
+8. stale lock은 자동으로 제거하지 마세요. 살아 있는 owner가 없음을 확인하지 않고 lock을 삭제하지 마세요. 강제 reset, stash, `worktree prune`, `workspace forget` 등 데이터를 지우는 명령을 전환 과정에 쓰지 마세요. handoff는 jira-tern에서 새로 생성하고 구 handoff는 보존합니다.
+
 ## 사용법
 
 | 키 | 동작 |

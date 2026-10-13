@@ -1,6 +1,6 @@
 schema = 1
 id = "jira-tern"
 name = "Jira"
-version = "0.2.0"
+version = "0.2.1"
 icon = "terminal"
 window = "window.luau"

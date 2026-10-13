@@ -24,6 +24,11 @@ pub(crate) const NEW_NAME_ID: &str = "main.new-name";
 pub(crate) const EXISTING_PATH_ID: &str = "main.existing-path";
 pub(crate) const COMMENT_EDITOR_ID: &str = "main.comment";
 pub(crate) const INSTRUCTION_EDITOR_ID: &str = "main.instruction";
+/// Static wizard screens put their body under key `text` and their heading under `title`.
+pub(crate) const WIZARD_TEXT_ID: &str = "main.text";
+pub(crate) const WIZARD_TITLE_ID: &str = "main.title";
+/// Help suffix for wizard screens whose text scrolls.
+const SCROLL_HELP: &str = " · j/k PgUp/PgDn g/G scroll";
 
 type N = Node<Msg>;
 
@@ -619,7 +624,7 @@ fn transition(state: &State, t: &TransitionFlow) -> Screen {
             ],
             "Esc cancel",
         ),
-        TStep::Blocked { since, url } => (
+        TStep::Blocked { since, url, .. } => (
             vec![
                 heading("title", "Jira 이력을 확인했습니까?"),
                 lines(
@@ -824,7 +829,7 @@ fn wizard(state: &State, w: &Wizard) -> Screen {
                 ),
                 buttons(&[("Open anyway", "enter"), ("Back", "escape")]),
             ],
-            "Enter acknowledge · Esc back".into(),
+            format!("Enter acknowledge · Esc back{SCROLL_HELP}"),
         ),
         WStep::Action { selected } => {
             let destination = w.plan.as_ref().map(|p| p.destination().to_owned()).unwrap_or_default();
@@ -847,7 +852,7 @@ fn wizard(state: &State, w: &Wizard) -> Screen {
                 body.push(lines("text", &snapshot_preview_lines(snapshot, &state.config.omp.profile)));
             }
             body.push(buttons(&[("Continue", "enter"), ("Back", "escape")]));
-            (body, "Enter continue · Esc back".into())
+            (body, format!("Enter continue · Esc back{SCROLL_HELP}"))
         }
         WStep::PartialAccept => {
             let reasons: Vec<String> = w
@@ -866,7 +871,7 @@ fn wizard(state: &State, w: &Wizard) -> Screen {
                     toned("text", text.join("\n"), Level::Warning),
                     buttons(&[("Continue", "enter"), ("Back", "escape")]),
                 ],
-                "Enter/y continue · Esc/n back".into(),
+                format!("Enter/y continue · Esc/n back{SCROLL_HELP}"),
             )
         }
         WStep::Instruction => (
@@ -882,7 +887,7 @@ fn wizard(state: &State, w: &Wizard) -> Screen {
                 body.push(lines("text", &final_confirm_lines(state, w, plan)));
             }
             body.push(buttons(&[("Confirm", "enter"), ("Back", "escape")]));
-            (body, "Enter confirm · Esc back".into())
+            (body, format!("Enter confirm · Esc back{SCROLL_HELP}"))
         }
         WStep::Executing { .. } => (
             vec![
@@ -902,11 +907,11 @@ fn wizard(state: &State, w: &Wizard) -> Screen {
                 ),
                 buttons(&[("Re-launch", "enter"), ("Back", "escape")]),
             ],
-            "Enter re-launch · Esc back".into(),
+            format!("Enter re-launch · Esc back{SCROLL_HELP}"),
         ),
         WStep::Message { title, lines: text, .. } => (
             vec![heading("title", title.clone()), lines("text", text), buttons(&[("Continue", "enter")])],
-            "Enter/Esc continue".into(),
+            format!("Enter/Esc continue{SCROLL_HELP}"),
         ),
     };
     Screen::new(with_message(body, &w.message), help)
@@ -923,6 +928,7 @@ fn outcome_screen(outcome: &Outcome) -> (Vec<N>, String) {
         actions.push(("Re-launch…", "l"));
         help.push_str(" · l re-launch (after inspecting tabs/splits)");
     }
+    help.push_str(SCROLL_HELP);
     (
         vec![
             toned("title", outcome.title.clone(), outcome.level),

@@ -19,6 +19,7 @@ use crate::state::{StateError, StateStore, random_id};
 pub enum TransitionError {
     /// A previous request for this issue is pending or its outcome unknown; inspect Jira history first.
     Blocked {
+        attempt: String,
         record_started_at: String,
     },
     /// Status or transition list changed since approval; the approval was discarded.
@@ -34,7 +35,9 @@ pub enum TransitionError {
 impl fmt::Display for TransitionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TransitionError::Blocked { record_started_at } => write!(
+            TransitionError::Blocked {
+                record_started_at, ..
+            } => write!(
                 f,
                 "이전 전환 요청({record_started_at} 시작)의 결과가 불확실합니다. Jira 이력을 확인한 뒤 진행하세요."
             ),
@@ -49,11 +52,18 @@ impl fmt::Display for TransitionError {
 
 impl std::error::Error for TransitionError {}
 
+/// The uncertain previous request the user is shown and must acknowledge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockedAttempt {
+    pub attempt: String,
+    pub started_at: String,
+}
+
 pub struct TransitionChoices {
     pub issue: Issue,
     pub transitions: Vec<Transition>,
-    /// Start time of a pending/unknown previous request that blocks new transitions.
-    pub blocked_since: Option<String>,
+    /// A pending/unknown previous request that blocks new transitions.
+    pub blocked: Option<BlockedAttempt>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,16 +149,19 @@ impl TransitionService {
     /// Fresh issue + transitions, plus any uncertain previous request.
     pub fn load(&self, key: &str) -> Result<TransitionChoices, TransitionError> {
         let key = Self::normalize(key)?;
-        let blocked_since = self
+        let blocked = self
             .read(&key)?
             .filter(TransitionRecord::uncertain)
-            .map(|r| r.started_at);
+            .map(|r| BlockedAttempt {
+                attempt: r.attempt,
+                started_at: r.started_at,
+            });
         let issue = self.jira.issue(&key).map_err(TransitionError::Jira)?;
         let transitions = self.jira.transitions(&key).map_err(TransitionError::Jira)?;
         Ok(TransitionChoices {
             issue,
             transitions,
-            blocked_since,
+            blocked,
         })
     }
 
@@ -199,6 +212,7 @@ impl TransitionService {
     ) -> Result<TransitionResult, TransitionError> {
         if let Some(current) = self.read(key)?.filter(TransitionRecord::uncertain) {
             return Err(TransitionError::Blocked {
+                attempt: current.attempt,
                 record_started_at: current.started_at,
             });
         }
@@ -267,22 +281,29 @@ impl TransitionService {
         Ok(result)
     }
 
-    /// Records that the user inspected Jira history after a pending/unknown outcome,
-    /// unblocking the next transition for this issue.
-    pub fn acknowledge_unknown(&self, key: &str) -> Result<(), TransitionError> {
+    /// Records that the user inspected Jira history for the uncertain request `attempt`
+    /// they were shown, unblocking the next transition for this issue. A newer uncertain
+    /// attempt is never marked inspected; it is reported as `Blocked` instead.
+    pub fn acknowledge_unknown(&self, key: &str, attempt: &str) -> Result<(), TransitionError> {
         let key = Self::normalize(key)?;
         self.state
             .with_locks(&[self.lock_key(&key)], || -> Result<(), TransitionError> {
-                if let Some(record) = self.read(&key)?.filter(TransitionRecord::uncertain) {
-                    let inspected = TransitionRecord {
-                        state: RecordState::Inspected,
-                        ..record
-                    };
-                    self.state
-                        .write_record(&self.record_path(&key), &inspected)
-                        .map_err(TransitionError::State)?;
+                let Some(record) = self.read(&key)?.filter(TransitionRecord::uncertain) else {
+                    return Ok(());
+                };
+                if record.attempt != attempt {
+                    return Err(TransitionError::Blocked {
+                        attempt: record.attempt,
+                        record_started_at: record.started_at,
+                    });
                 }
-                Ok(())
+                let inspected = TransitionRecord {
+                    state: RecordState::Inspected,
+                    ..record
+                };
+                self.state
+                    .write_record(&self.record_path(&key), &inspected)
+                    .map_err(TransitionError::State)
             })
             .map_err(TransitionError::Lock)?
     }
@@ -592,7 +613,7 @@ mod tests {
         );
         assert_eq!(e.record().unwrap().state, RecordState::Rejected);
         // A definite rejection does not block the next attempt.
-        assert!(e.service.load(KEY).unwrap().blocked_since.is_none());
+        assert!(e.service.load(KEY).unwrap().blocked.is_none());
     }
 
     #[test]
@@ -610,15 +631,17 @@ mod tests {
         // Back to To Do so the tuple would otherwise match.
         e.jira.fx.lock().unwrap().status = todo();
         e.jira.fx.lock().unwrap().post = Post::Applied;
-        assert!(e.service.load(KEY).unwrap().blocked_since.is_some());
+        let blocked = e.service.load(KEY).unwrap().blocked.unwrap();
         assert!(matches!(
             e.service.apply(KEY, &from, &t),
             Err(TransitionError::Blocked { .. })
         ));
         assert_eq!(e.posts(), 1);
 
-        e.service.acknowledge_unknown(KEY).unwrap();
-        assert!(e.service.load(KEY).unwrap().blocked_since.is_none());
+        e.service
+            .acknowledge_unknown(KEY, &blocked.attempt)
+            .unwrap();
+        assert!(e.service.load(KEY).unwrap().blocked.is_none());
         e.service.apply(KEY, &from, &t).unwrap();
         assert_eq!(e.posts(), 2);
         assert_eq!(e.record().unwrap().state, RecordState::Acknowledged);
@@ -643,8 +666,11 @@ mod tests {
             .unwrap();
         let (from, t) = e.approve();
         assert_eq!(
-            e.service.load(KEY).unwrap().blocked_since.as_deref(),
-            Some("2026-10-12T00:00:00.000Z")
+            e.service.load(KEY).unwrap().blocked,
+            Some(BlockedAttempt {
+                attempt: "previous-attempt".into(),
+                started_at: "2026-10-12T00:00:00.000Z".into(),
+            })
         );
         assert!(matches!(
             e.service.apply(KEY, &from, &t),
@@ -653,12 +679,91 @@ mod tests {
         assert_eq!(e.posts(), 0);
         assert_eq!(e.record().unwrap().attempt, "previous-attempt");
 
-        e.service.acknowledge_unknown(KEY).unwrap();
+        e.service
+            .acknowledge_unknown(KEY, "previous-attempt")
+            .unwrap();
         e.service.apply(KEY, &from, &t).unwrap();
         assert_eq!(e.posts(), 1);
         let record = e.record().unwrap();
         assert_eq!(record.state, RecordState::Acknowledged);
         assert_ne!(record.attempt, "previous-attempt");
+    }
+
+    #[test]
+    fn stale_acknowledgement_never_inspects_a_newer_attempt() {
+        let e = env(Post::UnknownApplied);
+        let (from, t) = e.approve();
+        e.service.apply(KEY, &from, &t).unwrap();
+        assert_eq!(e.posts(), 1);
+        let seen = e.service.load(KEY).unwrap().blocked.unwrap();
+
+        // A newer request (attempt Y) is recorded after the user saw attempt X.
+        let newer = TransitionRecord {
+            attempt: "attempt-y".into(),
+            state: RecordState::Pending,
+            started_at: "2026-10-13T00:00:00.000Z".into(),
+            ..e.record().unwrap()
+        };
+        assert_ne!(newer.attempt, seen.attempt);
+        e.state
+            .write_record(&e.service.record_path(KEY), &newer)
+            .unwrap();
+
+        let err = e
+            .service
+            .acknowledge_unknown(KEY, &seen.attempt)
+            .unwrap_err();
+        assert!(matches!(
+            &err,
+            TransitionError::Blocked { attempt, record_started_at }
+                if attempt == "attempt-y" && record_started_at == "2026-10-13T00:00:00.000Z"
+        ));
+        let stored = e.record().unwrap();
+        assert_eq!(stored.attempt, "attempt-y");
+        assert_eq!(stored.state, RecordState::Pending);
+
+        e.jira.fx.lock().unwrap().status = todo();
+        e.jira.fx.lock().unwrap().post = Post::Applied;
+        assert!(matches!(
+            e.service.apply(KEY, &from, &t),
+            Err(TransitionError::Blocked { .. })
+        ));
+        assert_eq!(e.posts(), 1);
+
+        e.service.acknowledge_unknown(KEY, "attempt-y").unwrap();
+        assert_eq!(e.record().unwrap().state, RecordState::Inspected);
+    }
+
+    #[test]
+    fn acknowledgement_without_uncertainty_does_not_write() {
+        let e = env(Post::Applied);
+        e.service.acknowledge_unknown(KEY, "any").unwrap();
+        assert!(e.record().is_none());
+
+        for state in [
+            RecordState::Inspected,
+            RecordState::Acknowledged,
+            RecordState::Rejected,
+        ] {
+            let record = TransitionRecord {
+                version: 1,
+                attempt: "settled".into(),
+                key: KEY.into(),
+                site: SITE.into(),
+                transition_id: "31".into(),
+                from_status_id: "10000".into(),
+                to_status_id: "3".into(),
+                state,
+                started_at: "2026-10-12T00:00:00.000Z".into(),
+            };
+            e.state
+                .write_record(&e.service.record_path(KEY), &record)
+                .unwrap();
+            e.service.acknowledge_unknown(KEY, "other").unwrap();
+            let stored = e.record().unwrap();
+            assert_eq!(stored.state, state);
+            assert_eq!(stored.attempt, "settled");
+        }
     }
 
     #[test]

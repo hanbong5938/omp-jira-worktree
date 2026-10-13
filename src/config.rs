@@ -198,16 +198,27 @@ fn normalize_base_url(value: Option<&Value>, path: &str) -> Result<String> {
     if text.contains('#') {
         return fail(path, "must not contain a fragment");
     }
-    let (authority, pathname) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => (rest, ""),
-    };
-    let authority = authority.to_ascii_lowercase();
-    let Some((host, port)) = split_host_port(&authority) else {
+    let authority = rest.split('/').next().unwrap_or("");
+    if authority.is_empty() || text.contains('\\') || authority.contains('%') {
+        return fail(path, "must be a valid URL");
+    }
+    let Ok(url) = url::Url::parse(&text) else {
         return fail(path, "must be a valid URL");
     };
-    if host.is_empty() {
+    let Some(host) = url.host_str() else {
         return fail(path, "must be a valid URL");
+    };
+    if !url.username().is_empty() || url.password().is_some() {
+        return fail(path, "must not contain userinfo");
+    }
+    if url.query().is_some() {
+        return fail(path, "must not contain a query");
+    }
+    if url.fragment().is_some() {
+        return fail(path, "must not contain a fragment");
+    }
+    if url.scheme() != scheme {
+        return fail(path, "must use https");
     }
     if scheme == "http" && !matches!(host, "localhost" | "127.0.0.1" | "[::1]") {
         return fail(
@@ -215,47 +226,17 @@ fn normalize_base_url(value: Option<&Value>, path: &str) -> Result<String> {
             "must use https (http is allowed only for localhost, 127.0.0.1, [::1])",
         );
     }
-    let default_port = if scheme == "https" { 443 } else { 80 };
-    let origin = match port {
-        Some(p) if p != default_port => format!("{scheme}://{host}:{p}"),
-        _ => format!("{scheme}://{host}"),
+    let origin = match url.port() {
+        Some(p) => format!("{scheme}://{host}:{p}"),
+        None => format!("{scheme}://{host}"),
     };
-    Ok(format!("{origin}{}", pathname.trim_end_matches('/')))
+    Ok(format!("{origin}{}", url.path().trim_end_matches('/')))
 }
 
 fn strip_prefix_ci<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
     let head = text.get(..prefix.len())?;
     head.eq_ignore_ascii_case(prefix)
         .then(|| &text[prefix.len()..])
-}
-
-/// Splits `host[:port]` (IPv6 hosts bracketed); `None` for malformed input.
-fn split_host_port(authority: &str) -> Option<(&str, Option<u16>)> {
-    let (host, port) = if authority.starts_with('[') {
-        let end = authority.find(']')?;
-        let (host, tail) = authority.split_at(end + 1);
-        match tail {
-            "" => (host, None),
-            _ => (host, Some(tail.strip_prefix(':')?)),
-        }
-    } else {
-        match authority.split_once(':') {
-            Some((h, p)) => (h, Some(p)),
-            None => (authority, None),
-        }
-    };
-    let valid_host = host.starts_with('[')
-        || host
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'));
-    if !valid_host {
-        return None;
-    }
-    match port {
-        None | Some("") => Some((host, None)),
-        Some(p) if p.chars().all(|c| c.is_ascii_digit()) => Some((host, Some(p.parse().ok()?))),
-        Some(_) => None,
-    }
 }
 
 fn is_project_key(key: &str) -> bool {
@@ -555,6 +536,47 @@ mod tests {
         assert_eq!(c.jira.base_url, "http://127.0.0.1:8080/jira");
         assert_eq!(c.jira.email, None);
         assert_eq!(c.jira.deployment, Deployment::Dc);
+    }
+
+    #[test]
+    fn idn_urls_are_canonicalized() {
+        for (input, expected) in [
+            (
+                "https://BÜCHER.example/Jira/",
+                "https://xn--bcher-kva.example/Jira",
+            ),
+            (
+                "https://xn--bcher-kva.example/Jira",
+                "https://xn--bcher-kva.example/Jira",
+            ),
+            ("HTTPS://Jira.Example.COM:443/", "https://jira.example.com"),
+            ("http://[::1]:8080/", "http://[::1]:8080"),
+        ] {
+            let c = load(&with_jira(json!({ "baseUrl": input }))).expect(input);
+            assert_eq!(c.jira.base_url, expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn url_parser_does_not_relax_security_restrictions() {
+        for input in [
+            "http://bücher.example",
+            "https://user@jira.example.com",
+            "https://jira.example.com/?q",
+            "https://jira.example.com/#f",
+            "https://jira.example.com/a b",
+            "https:///x",
+            "https://jira.example.com\\x",
+            "https://jira%2eexample.com",
+            "http://[::1",
+            "https://jira.example.com:70000",
+            "http://localhost.evil.com",
+            "ftp://jira.example.com",
+        ] {
+            let err = load(&with_jira(json!({ "baseUrl": input }))).expect_err(input);
+            assert!(matches!(err, ConfigError::Invalid(_)), "{input}");
+            assert!(err.to_string().contains("$.jira.baseUrl"), "{input}: {err}");
+        }
     }
 
     #[test]

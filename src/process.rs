@@ -3,7 +3,7 @@
 use std::io::{self, Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -61,14 +61,26 @@ pub fn run(
 
     let deadline = Instant::now() + timeout;
     let mut timed_out = false;
+    // The direct child may exit while a grandchild still holds the inherited
+    // pipes, so completion also requires both readers to reach EOF.
+    let mut exited: Option<ExitStatus> = None;
     let status = loop {
-        if let Some(status) = child.try_wait()? {
+        if exited.is_none() {
+            exited = child.try_wait()?;
+        }
+        if let Some(status) = exited
+            && out.is_finished()
+            && err.is_finished()
+        {
             break status;
         }
         if Instant::now() >= deadline {
             timed_out = true;
             kill_group(pid);
-            break child.wait()?;
+            break match exited {
+                Some(status) => status,
+                None => child.wait()?,
+            };
         }
         thread::sleep(Duration::from_millis(10));
     };
@@ -168,6 +180,47 @@ mod tests {
         .unwrap();
         assert!(r.killed);
         assert!(start.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn exited_parent_with_inherited_pipes_times_out() {
+        let start = Instant::now();
+        let r = run(
+            "sh",
+            &["-c", "sleep 10 & printf token"],
+            None,
+            Duration::from_millis(300),
+            None,
+        )
+        .unwrap();
+        assert!(start.elapsed() < Duration::from_secs(5));
+        assert_eq!(r.stdout, "token");
+        assert_eq!(r.code, Some(0));
+        assert!(r.killed);
+    }
+
+    #[test]
+    fn exited_parent_with_stderr_only_times_out() {
+        let start = Instant::now();
+        let r = run(
+            "sh",
+            &["-c", "sleep 10 >/dev/null & printf token"],
+            None,
+            Duration::from_millis(300),
+            None,
+        )
+        .unwrap();
+        assert!(start.elapsed() < Duration::from_secs(5));
+        assert_eq!(r.stdout, "token");
+        assert_eq!(r.code, Some(0));
+        assert!(r.killed);
+    }
+
+    #[test]
+    fn output_cap_still_kills_and_bounds_output() {
+        let r = run("sh", &["-c", "yes x"], None, Duration::from_secs(5), None).unwrap();
+        assert!(r.killed);
+        assert_eq!(r.stdout.len(), RUN_MAX_BUFFER);
     }
 
     #[test]

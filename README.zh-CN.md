@@ -44,6 +44,19 @@ tern plugin link .
 
 macOS 钥匙串 token 命令示例：`["security", "find-generic-password", "-s", "jira-api-token", "-a", "<you>", "-w"]`。
 
+### 从 omp-jira-worktree 升级
+
+没有自动迁移。请按以下顺序手动切换；以下步骤不会移动或删除任何数据。
+
+1. 退出旧版 omp extension 和所有 jira-tern 实例，并确认没有正在进行的 native add/流转/launch。两个 namespace 的 lock 互不保护，切勿在两者同时运行时迁移。
+2. 旧配置：`$OMP_JIRA_WORKTREE_CONFIG` 或 `${XDG_CONFIG_HOME:-~/.config}/omp-jira-worktree/config.json`。新配置：`$JIRA_TERN_CONFIG` 或 `${XDG_CONFIG_HOME:-~/.config}/jira-tern/config.json`（`XDG_CONFIG_HOME` 仅在为绝对路径时使用）。保留原文件，仅当新路径尚无文件时才复制；若新配置已存在，不要覆盖，请手动比较。也可以将 `JIRA_TERN_CONFIG` 设为绝对路径。jira-tern **不会读取** `OMP_JIRA_WORKTREE_CONFIG`。
+3. 顶层键相同（`jira`、`filters`、`search`、`worktree`、`handoff`、`omp`）。将副本与 `config.example.json` 比较，修正 URL 或路径错误。若省略了 `worktree.root` 且想继续使用旧位置，请显式设置 `"root": "~/.local/share/omp-jira-worktree/checkouts"`；否则使用新默认值 `~/.local/share/jira-tern/checkouts`。显式指定的 root 保持不变。`jira.baseUrl` 现在由标准 URL 解析器规范化（IDN → Punycode、去除默认端口、规范化非标准 IPv4 与 context path），该规范 URL 即流转记录的 site identity。请比较旧记录的 `site` 与新的规范 URL；若不同，先完成第 6 步的检查。
+4. **切勿 `mv`/`cp` 现有的 Git worktree/jj workspace**，其 native 注册与 identity 必须保持不变。用 `git -C <source> worktree list --porcelain` 或 `jj --ignore-working-copy -R <source> workspace list` 并检查每个 checkout 的状态，然后在 jira-tern 中选择 **Existing**。不要对已有的 branch/workspace 再次执行 **New**。
+5. 旧 state root：`${XDG_STATE_HOME:-~/.local/state}/omp-jira-worktree`。新 root：`${XDG_STATE_HOME:-~/.local/state}/jira-tern`。保留旧目录及其 handoff 文件。不要整体复制或删除 state/locks/receipts/transitions。receipt 结构相似并不代表 state 兼容。
+6. 旧流转记录位于 `transitions/<SHA-256(JSON([site,key]))>.json`，新记录位于 `records/transitions/<自有 128-bit digest>.json`。对每条旧的 `pending`/`unknown` 记录，读取 `site`、`key`、`attempt`、`startedAt`、`transitionId`，并在从 jira-tern 发送任何流转**之前**在 Jira 中核实该事项的实际历史。若有无法核实的记录，停止切换。不要仅因当前状态一致就断定请求未执行，也不要重新发送。**警告：** jira-tern 不读取旧记录，因此不会自动阻止重复流转。
+7. 对旧的 pending/failed receipt，直接检查 destination 的文件、branch/workspace 和 working tree 状态。核实之前不要打开或重新创建不确定的 checkout。没有 receipt 时 jira-tern **可能不会**显示恢复提示，而提示本身也不保证安全。若已损坏，请停止，直到用 native Git/jj 工具修复。
+8. 切勿自动删除 stale lock；未确认没有存活的 owner 前不要删除任何 lock。切换过程中不要使用强制 reset、stash、`worktree prune`、`workspace forget` 或任何删除数据的命令。在 jira-tern 中重新生成 handoff，保留旧的 handoff。
+
 ## 使用
 
 | 键 | 操作 |

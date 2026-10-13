@@ -44,6 +44,19 @@ The config is read from `$JIRA_TERN_CONFIG` (absolute path) or `${XDG_CONFIG_HOM
 
 macOS Keychain example token command: `["security", "find-generic-password", "-s", "jira-api-token", "-a", "<you>", "-w"]`.
 
+### Upgrading from omp-jira-worktree
+
+There is no automatic migration. Do the cutover by hand, in this order; nothing below moves or deletes data.
+
+1. Quit the old omp extension and every jira-tern instance, and make sure no native add, transition, or launch is in flight. The two namespaces' locks do not protect each other, so never migrate while both run.
+2. Old config: `$OMP_JIRA_WORKTREE_CONFIG` or `${XDG_CONFIG_HOME:-~/.config}/omp-jira-worktree/config.json`. New config: `$JIRA_TERN_CONFIG` or `${XDG_CONFIG_HOME:-~/.config}/jira-tern/config.json` (`XDG_CONFIG_HOME` is used only when absolute). Keep the original and copy it only if the new path does not exist yet; if a new config already exists, compare the two by hand instead of overwriting. Setting `JIRA_TERN_CONFIG` to an absolute path is also fine. jira-tern does **not** read `OMP_JIRA_WORKTREE_CONFIG`.
+3. The top-level keys are the same (`jira`, `filters`, `search`, `worktree`, `handoff`, `omp`). Compare the copy with `config.example.json` and fix any URL or path errors. If `worktree.root` was omitted and you want to keep the old location, set `"root": "~/.local/share/omp-jira-worktree/checkouts"` explicitly; otherwise the new default `~/.local/share/jira-tern/checkouts` is used. An explicit root stays as is. `jira.baseUrl` is now canonicalized by a standard URL parser (IDN → Punycode, default port dropped, non-canonical IPv4 and context path normalized), and that canonical URL is the site identity of transition records. Compare the `site` of old records with the new canonical URL; if they differ, do the checks in step 6 first.
+4. **Never `mv`/`cp` existing Git worktrees or jj workspaces**; their native registration and identity must stay intact. Check them with `git -C <source> worktree list --porcelain` or `jj --ignore-working-copy -R <source> workspace list` plus each checkout's status, then pick them as **Existing** in jira-tern. Do not run **New** again for an existing branch or workspace.
+5. Old state root: `${XDG_STATE_HOME:-~/.local/state}/omp-jira-worktree`. New: `${XDG_STATE_HOME:-~/.local/state}/jira-tern`. Keep the old directory and its handoff files. Do not copy or delete state, locks, receipts, or transitions wholesale. A similar receipt structure does not mean the state is compatible.
+6. Old transition records live at `transitions/<SHA-256(JSON([site,key]))>.json`; new ones at `records/transitions/<own 128-bit digest>.json`. For every old `pending`/`unknown` record, read `site`, `key`, `attempt`, `startedAt`, and `transitionId`, and verify the issue's actual history in Jira **before** sending any transition from jira-tern. If a record cannot be verified, stop the cutover. Do not conclude a request never ran just because the current status matches, and do not resend it. **Warning:** jira-tern does not read old records, so nothing blocks a duplicate transition automatically.
+7. For old pending/failed receipts, inspect the destination's files, branch/workspace, and working tree directly. Do not open or recreate an uncertain checkout before verifying it. Without a receipt jira-tern may show **no** recovery prompt, and a prompt does not by itself guarantee safety. If a checkout is damaged, stop until it has been repaired with native Git/jj tools.
+8. Never remove stale locks automatically, and never delete a lock without confirming no live owner holds it. Do not use force reset, stash, `worktree prune`, `workspace forget`, or any data-deleting command as part of the cutover. Regenerate handoffs in jira-tern; keep the old ones.
+
 ## Use
 
 | Key | Action |
