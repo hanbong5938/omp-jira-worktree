@@ -1,0 +1,24 @@
+{
+  "jira": {
+    "baseUrl": "https://example.atlassian.net",
+    "deployment": "cloud",
+    "auth": "basic",
+    "email": "you@example.com",
+    "tokenCommand": ["security", "find-generic-password", "-s", "jira-api-token", "-a", "you@example.com", "-w"],
+    "maxResults": 50,
+    "timeoutMs": 20000
+  },
+  "filters": [
+    { "name": "My open issues", "jql": "assignee = currentUser() AND resolution = Unresolved ORDER BY updated DESC" }
+  ],
+  "search": { "jql": "text ~ \"{query}\" ORDER BY updated DESC" },
+  "worktree": {
+    "repos": {},
+    "prefer": "jj",
+    "root": "~/.local/share/omp-jira-worktree/checkouts",
+    "gitBase": null,
+    "jjBase": null
+  },
+  "handoff": { "maxComments": 50, "maxDescriptionChars": 6000, "maxCommentChars": 12000, "maxChars": 64000 },
+  "omp": { "binary": "omp", "profile": "default" }
+}
